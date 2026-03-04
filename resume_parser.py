@@ -1,5 +1,7 @@
-import PyPDF2
-from io import BytesIO
+import re
+from typing import Iterable
+
+import pdfplumber
 
 
 def extract_text_from_pdf(pdf_file):
@@ -13,16 +15,13 @@ def extract_text_from_pdf(pdf_file):
         str: Extracted text from the PDF
     """
     try:
-        # Read the PDF file
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
-        text = ""
-
-        # Extract text from each page
-        for page_num in range(len(pdf_reader.pages)):
-            page = pdf_reader.pages[0]
-            text += page.extract_text()
-
-        return text.strip()
+        text_parts = []
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text() or ""
+                if page_text:
+                    text_parts.append(page_text)
+        return "\n".join(text_parts).strip()
     except Exception as e:
         raise Exception(f"Error extracting text from PDF: {str(e)}")
 
@@ -37,6 +36,16 @@ def clean_resume_text(text):
     Returns:
         str: Cleaned and normalized text
     """
-    # Remove extra whitespaces and normalize
-    cleaned_text = ' '.join(text.split())
+    if not text:
+        return ""
+
+    cleaned_text = text
+    cleaned_text = cleaned_text.replace("\u00a0", " ")
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text)
+    cleaned_text = re.sub(r"[^\w\s\-\+\.#/,]", " ", cleaned_text)
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
     return cleaned_text
+
+
+def clean_text_batch(texts: Iterable[str]):
+    return [clean_resume_text(item) for item in texts]

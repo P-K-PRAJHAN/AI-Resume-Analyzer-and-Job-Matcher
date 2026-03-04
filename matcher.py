@@ -1,7 +1,10 @@
-from sentence_transformers import SentenceTransformer, util
-import torch
+from typing import Dict, List
+
 import numpy as np
-from typing import List, Tuple
+
+from embedding_engine import EmbeddingEngine
+from scoring_engine import ScoringEngine
+from skill_extractor import SkillExtractor
 
 
 class ResumeJobMatcher:
@@ -12,9 +15,11 @@ class ResumeJobMatcher:
         Args:
             model_name (str): Name of the sentence transformer model to use
         """
-        self.model = SentenceTransformer(model_name)
+        self.embedding_engine = EmbeddingEngine(model_name=model_name)
+        self.skill_extractor = SkillExtractor()
+        self.scoring_engine = ScoringEngine()
 
-    def calculate_similarity(self, resume_skills: List[str], job_skills: List[str]) -> float:
+    def calculate_similarity(self, resume_text: str, job_text: str) -> float:
         """
         Calculate the semantic similarity between resume skills and job skills
 
@@ -25,25 +30,12 @@ class ResumeJobMatcher:
         Returns:
             float: Similarity score between 0 and 1 (as percentage when multiplied by 100)
         """
-        if not resume_skills or not job_skills:
+        if not resume_text or not job_text:
             return 0.0
 
-        # Convert lists to sentences for embedding
-        resume_text = " ".join(resume_skills)
-        job_text = " ".join(job_skills)
-
-        # Generate embeddings
-        resume_embedding = self.model.encode(
-            resume_text, convert_to_tensor=True)
-        job_embedding = self.model.encode(job_text, convert_to_tensor=True)
-
-        # Calculate cosine similarity
-        cosine_score = util.cos_sim(resume_embedding, job_embedding)
-
-        # Convert tensor to float and return
-        similarity_score = cosine_score.item()
-
-        # Ensure the score is between 0 and 1
+        resume_embedding = self.embedding_engine.encode_text(resume_text)
+        job_embedding = self.embedding_engine.encode_text(job_text)
+        similarity_score = float(np.dot(resume_embedding, job_embedding))
         return max(0.0, min(1.0, similarity_score))
 
     def calculate_keyword_match_percentage(self, resume_skills: List[str], job_skills: List[str]) -> float:
@@ -57,20 +49,8 @@ class ResumeJobMatcher:
         Returns:
             float: Percentage of matched skills (0-100)
         """
-        if not job_skills:
-            return 0.0
-
-        resume_set = set(skill.lower().strip() for skill in resume_skills)
-        job_set = set(skill.lower().strip() for skill in job_skills)
-
-        # Calculate intersection
-        matched_skills = resume_set.intersection(job_set)
-
-        # Calculate percentage
-        match_percentage = (len(matched_skills) /
-                            len(job_set)) * 100 if job_set else 0.0
-
-        return match_percentage
+        overlap = self.skill_extractor.compute_skill_overlap(resume_skills, job_skills)
+        return overlap["overlap_score"] * 100
 
     def get_skill_gaps(self, resume_skills: List[str], job_skills: List[str]) -> List[str]:
         """
@@ -83,13 +63,8 @@ class ResumeJobMatcher:
         Returns:
             List[str]: List of missing skills
         """
-        resume_set = set(skill.lower().strip() for skill in resume_skills)
-        job_set = set(skill.lower().strip() for skill in job_skills)
-
-        # Find skills in job but not in resume
-        missing_skills = job_set - resume_set
-
-        return sorted(list(missing_skills))
+        overlap = self.skill_extractor.compute_skill_overlap(resume_skills, job_skills)
+        return overlap["missing_skills"]
 
     def get_common_skills(self, resume_skills: List[str], job_skills: List[str]) -> List[str]:
         """
@@ -102,15 +77,16 @@ class ResumeJobMatcher:
         Returns:
             List[str]: List of common skills
         """
-        resume_set = set(skill.lower().strip() for skill in resume_skills)
-        job_set = set(skill.lower().strip() for skill in job_skills)
+        overlap = self.skill_extractor.compute_skill_overlap(resume_skills, job_skills)
+        return overlap["common_skills"]
 
-        # Find common skills
-        common_skills = resume_set.intersection(job_set)
-
-        return sorted(list(common_skills))
-
-    def calculate_comprehensive_match(self, resume_skills: List[str], job_skills: List[str]) -> dict:
+    def calculate_comprehensive_match(
+        self,
+        resume_skills: List[str],
+        job_skills: List[str],
+        resume_text: str = "",
+        job_text: str = "",
+    ) -> Dict[str, object]:
         """
         Calculate comprehensive match metrics between resume and job
 
@@ -121,23 +97,28 @@ class ResumeJobMatcher:
         Returns:
             dict: Dictionary containing various match metrics
         """
-        semantic_similarity = self.calculate_similarity(
-            resume_skills, job_skills)
-        keyword_match_percentage = self.calculate_keyword_match_percentage(
-            resume_skills, job_skills)
-        skill_gaps = self.get_skill_gaps(resume_skills, job_skills)
-        common_skills = self.get_common_skills(resume_skills, job_skills)
+        semantic_similarity = self.calculate_similarity(resume_text, job_text)
+        overlap = self.skill_extractor.compute_skill_overlap(resume_skills, job_skills)
+        experience_info = self.scoring_engine.compute_experience_match(resume_text, job_text)
+        final_score = self.scoring_engine.compute_final_score(
+            semantic_similarity=semantic_similarity,
+            skill_overlap=overlap["overlap_score"],
+            experience_match=experience_info["experience_match"],
+        )
 
-        # Weighted score combining semantic similarity and keyword match
-        # Give 70% weight to semantic similarity and 30% to keyword match
-        weighted_score = (semantic_similarity * 0.7) + \
-            ((keyword_match_percentage / 100) * 0.3)
+        skill_gaps = overlap["missing_skills"]
+        common_skills = overlap["common_skills"]
+        keyword_match_percentage = overlap["overlap_score"] * 100
 
         return {
             'semantic_similarity': semantic_similarity,
             'keyword_match_percentage': keyword_match_percentage,
-            'weighted_score': weighted_score,
-            'match_percentage': round(weighted_score * 100, 2),
+            'skill_overlap_score': overlap["overlap_score"],
+            'experience_match_score': experience_info["experience_match"],
+            'resume_experience_years': experience_info["resume_years"],
+            'required_experience_years': experience_info["required_years"],
+            'weighted_score': final_score,
+            'match_percentage': round(final_score * 100, 2),
             'skill_gaps': skill_gaps,
             'common_skills': common_skills,
             'total_job_skills': len(job_skills),

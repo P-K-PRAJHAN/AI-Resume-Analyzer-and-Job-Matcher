@@ -1,5 +1,5 @@
 import ollama
-from typing import List, Dict
+from typing import Dict, List
 
 
 class LLMFeedbackGenerator:
@@ -12,8 +12,61 @@ class LLMFeedbackGenerator:
         """
         self.model_name = model_name
 
+    def _build_ollama_connection_error(self, original_error: Exception) -> str:
+        return (
+            "Failed to connect to Ollama server. "
+            "Start Ollama first using `ollama serve`, then retry. "
+            f"Original error: {original_error}"
+        )
+
+    def _chat(self, prompt: str) -> str:
+        try:
+            response = ollama.chat(
+                model=self.model_name,
+                messages=[{'role': 'user', 'content': prompt}]
+            )
+            return response['message']['content']
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "failed to connect" in error_text or "connection" in error_text:
+                return self._build_ollama_connection_error(exc)
+            if "not found" in error_text or "pull" in error_text:
+                return (
+                    f"Model '{self.model_name}' was not found locally. "
+                    f"Install it using: `ollama pull {self.model_name}`. "
+                    f"Original error: {exc}"
+                )
+            return f"Ollama request failed: {exc}"
+
+    def _build_rag_prompt(self, context: Dict[str, object]) -> str:
+        return f"""
+You are an AI resume coach.
+
+Use ONLY the provided structured context to produce grounded feedback.
+Do not invent information and do not assume details outside this context.
+
+Structured Context:
+- Candidate Skills: {', '.join(context.get('resume_skills', []))}
+- Job Skills: {', '.join(context.get('job_skills', []))}
+- Matched Skills: {', '.join(context.get('common_skills', []))}
+- Missing Skills: {', '.join(context.get('skill_gaps', []))}
+- Semantic Similarity: {context.get('semantic_similarity', 0):.2f}
+- Skill Overlap: {context.get('skill_overlap_score', 0):.2f}
+- Experience Match: {context.get('experience_match_score', 0):.2f}
+- Final Match Percentage: {context.get('match_percentage', 0):.2f}%
+
+Output format:
+1) Overall fit summary (2-3 lines)
+2) Top 3 missing priorities
+3) Resume rewrite tips (bullet points)
+4) 30-day practical action plan
+
+Keep response concise, specific, and encouraging (max 220 words).
+""".strip()
+
     def generate_improvement_suggestions(self, resume_skills: List[str], job_skills: List[str],
-                                         skill_gaps: List[str], match_percentage: float) -> str:
+                                         skill_gaps: List[str], match_percentage: float,
+                                         structured_context: Dict[str, object] | None = None) -> str:
         """
         Generate improvement suggestions using local LLM
 
@@ -26,47 +79,19 @@ class LLMFeedbackGenerator:
         Returns:
             str: Improvement suggestions from the LLM
         """
-        if not skill_gaps:
-            prompt = f"""
-            The candidate's resume matches the job requirements very well with a {match_percentage}% match.
-            The candidate has the following skills: {', '.join(resume_skills[:10])}.
-            The job requires: {', '.join(job_skills[:10])}.
-            
-            Provide positive feedback and suggest how the candidate can further enhance their profile for similar roles.
-            Keep the response concise and encouraging.
-            """
-        else:
-            prompt = f"""
-            Analyze the resume against the job description and provide improvement suggestions.
-            
-            Resume Skills: {', '.join(resume_skills)}
-            Job Requirements: {', '.join(job_skills)}
-            Missing Skills: {', '.join(skill_gaps)}
-            Current Match: {match_percentage}%
-            
-            Provide specific, actionable improvement suggestions to help the candidate improve their match score.
-            Organize suggestions by:
-            1. Top priority skills to learn
-            2. Recommended learning resources or courses
-            3. How to showcase existing skills better
-            4. General tips to improve the resume
-            
-            Be specific, constructive, and encouraging. Limit response to 200 words.
-            """
+        context = structured_context or {
+            "resume_skills": resume_skills,
+            "job_skills": job_skills,
+            "common_skills": sorted(set(resume_skills).intersection(set(job_skills))),
+            "skill_gaps": skill_gaps,
+            "semantic_similarity": 0.0,
+            "skill_overlap_score": 0.0,
+            "experience_match_score": 0.0,
+            "match_percentage": match_percentage,
+        }
+        prompt = self._build_rag_prompt(context)
 
-        try:
-            response = ollama.chat(
-                model=self.model_name,
-                messages=[
-                    {
-                        'role': 'user',
-                        'content': prompt
-                    }
-                ]
-            )
-            return response['message']['content']
-        except Exception as e:
-            return f"Error generating feedback: {str(e)}. Please ensure Ollama is installed and running with the '{self.model_name}' model."
+        return self._chat(prompt)
 
     def generate_cover_letter_suggestions(self, resume_skills: List[str], job_skills: List[str],
                                           job_description: str) -> str:
@@ -82,34 +107,18 @@ class LLMFeedbackGenerator:
             str: Cover letter suggestions
         """
         prompt = f"""
-        Generate suggestions for customizing a cover letter based on the resume and job description.
-        
-        Resume Skills: {', '.join(resume_skills)}
-        Job Requirements: {', '.join(job_skills)}
-        Job Description: {job_description[:500]}  # Limit length
-        
-        Provide specific advice on:
-        1. Which resume skills to highlight
-        2. How to align experience with job requirements
-        3. Key phrases to include
-        4. Structure recommendations
-        
-        Keep suggestions concise and actionable.
+        Create concise cover-letter guidance using this structured context only:
+        - Candidate Skills: {', '.join(resume_skills)}
+        - Job Skills: {', '.join(job_skills)}
+        - Job Snapshot: {job_description[:350]}
+
+        Provide:
+        1) strongest alignment points
+        2) 3 quantified impact-style bullet suggestions
+        3) closing paragraph guidance
         """
 
-        try:
-            response = ollama.chat(
-                model=self.model_name,
-                messages=[
-                    {
-                        'role': 'user',
-                        'content': prompt
-                    }
-                ]
-            )
-            return response['message']['content']
-        except Exception as e:
-            return f"Error generating cover letter suggestions: {str(e)}"
+        return self._chat(prompt)
 
     def generate_skill_learning_path(self, skill_gaps: List[str]) -> str:
         """
@@ -136,19 +145,7 @@ class LLMFeedbackGenerator:
         Focus on free or low-cost resources. Keep the learning path realistic and achievable.
         """
 
-        try:
-            response = ollama.chat(
-                model=self.model_name,
-                messages=[
-                    {
-                        'role': 'user',
-                        'content': prompt
-                    }
-                ]
-            )
-            return response['message']['content']
-        except Exception as e:
-            return f"Error generating learning path: {str(e)}"
+        return self._chat(prompt)
 
 
 # Example usage

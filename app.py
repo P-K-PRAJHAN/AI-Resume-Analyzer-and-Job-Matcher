@@ -1,276 +1,178 @@
 import streamlit as st
-from resume_parser import extract_text_from_pdf, clean_resume_text
-from skill_extractor import SkillExtractor
-from matcher import ResumeJobMatcher
+
+from embedding_engine import EmbeddingEngine
 from llm_feedback import LLMFeedbackGenerator
-import os
+from matcher import ResumeJobMatcher
+from resume_parser import clean_resume_text, extract_text_from_pdf
+from skill_extractor import SkillExtractor
+from vector_store import ResumeVectorStore
 
 
-# Initialize session state
-if 'analysis_complete' not in st.session_state:
+if "analysis_complete" not in st.session_state:
     st.session_state.analysis_complete = False
-if 'results' not in st.session_state:
-    st.session_state.results = None
-if 'resume_skills' not in st.session_state:
-    st.session_state.resume_skills = []
-if 'job_skills' not in st.session_state:
+if "ranked_results" not in st.session_state:
+    st.session_state.ranked_results = []
+if "job_skills" not in st.session_state:
     st.session_state.job_skills = []
+if "llm_feedback" not in st.session_state:
+    st.session_state.llm_feedback = ""
 
 
-def main():
-    st.set_page_config(
-        page_title="AI Resume Analyzer & Job Matcher",
-        page_icon="📄",
-        layout="wide"
+def run_analysis(uploaded_files, job_description: str, model_option: str):
+    skill_extractor = SkillExtractor()
+    matcher = ResumeJobMatcher()
+    embedding_engine = EmbeddingEngine()
+    vector_store = ResumeVectorStore(embedding_dim=384)
+    feedback_generator = LLMFeedbackGenerator(model_name=model_option)
+
+    cleaned_job = clean_resume_text(job_description)
+    job_skills = skill_extractor.extract_skills_from_text(cleaned_job)
+    job_embedding = embedding_engine.encode_text(cleaned_job)
+
+    resume_payload = []
+    for uploaded_file in uploaded_files:
+        resume_text = extract_text_from_pdf(uploaded_file)
+        cleaned_resume = clean_resume_text(resume_text)
+        resume_skills = skill_extractor.extract_skills_from_text(cleaned_resume)
+        resume_payload.append(
+            {
+                "file_name": uploaded_file.name,
+                "resume_text": cleaned_resume,
+                "resume_skills": resume_skills,
+            }
+        )
+
+    resume_embeddings = embedding_engine.encode_batch(
+        [item["resume_text"] for item in resume_payload]
     )
+    vector_store.build_index(resume_embeddings, resume_payload)
 
-    st.title("🤖 AI Resume Analyzer & Job Matcher")
-    st.markdown("""
-    Analyze your resume against job descriptions and get personalized improvement suggestions.
-    All processing happens locally - your data never leaves your computer!
-    """)
+    nearest = vector_store.search(job_embedding, top_k=len(resume_payload))
 
-    # Sidebar with instructions
-    with st.sidebar:
-        st.header("📋 How to Use")
-        st.markdown("""
-        1. Upload your resume (PDF format)
-        2. Paste the job description
-        3. Click "Analyze Match" to get results
-        4. Review skills match and improvement suggestions
-        """)
-
-        st.header("⚙️ Settings")
-        model_option = st.selectbox(
-            "Select LLM Model",
-            ["phi3", "llama3"],
-            help="Choose the local LLM model for generating suggestions"
+    ranked_results = []
+    for item in nearest:
+        match_result = matcher.calculate_comprehensive_match(
+            resume_skills=item["resume_skills"],
+            job_skills=job_skills,
+            resume_text=item["resume_text"],
+            job_text=cleaned_job,
+        )
+        ranked_results.append(
+            {
+                "file_name": item["file_name"],
+                "vector_similarity": item["vector_similarity"],
+                **match_result,
+                "resume_skills": item["resume_skills"],
+            }
         )
 
-        st.markdown("---")
-        st.info(
-            "💡 Tip: Make sure Ollama is running with your selected model installed.")
+    ranked_results = sorted(ranked_results, key=lambda x: x["match_percentage"], reverse=True)
 
-    # Main content
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("📄 Upload Resume")
-        uploaded_file = st.file_uploader(
-            "Choose a PDF file",
-            type=['pdf'],
-            help="Upload your resume in PDF format"
+    llm_feedback = ""
+    if ranked_results:
+        top = ranked_results[0]
+        llm_feedback = feedback_generator.generate_improvement_suggestions(
+            resume_skills=top["resume_skills"],
+            job_skills=job_skills,
+            skill_gaps=top["skill_gaps"],
+            match_percentage=top["match_percentage"],
+            structured_context={
+                "resume_skills": top["resume_skills"],
+                "job_skills": job_skills,
+                "common_skills": top["common_skills"],
+                "skill_gaps": top["skill_gaps"],
+                "semantic_similarity": top["semantic_similarity"],
+                "skill_overlap_score": top["skill_overlap_score"],
+                "experience_match_score": top["experience_match_score"],
+                "match_percentage": top["match_percentage"],
+            },
         )
 
-        if uploaded_file is not None:
-            st.success("✅ Resume uploaded successfully!")
-
-    with col2:
-        st.subheader("💼 Job Description")
-        job_description = st.text_area(
-            "Paste the job description here",
-            height=200,
-            placeholder="Enter the job description you want to match your resume against..."
-        )
-
-        if job_description:
-            st.success("✅ Job description entered!")
-
-    # Analysis button
-    analyze_button = st.button(
-        "🔍 Analyze Match",
-        type="primary",
-        disabled=not (uploaded_file and job_description)
-    )
-
-    # Perform analysis
-    if analyze_button:
-        with st.spinner("🔄 Analyzing your resume against the job description..."):
-            try:
-                # Initialize components
-                skill_extractor = SkillExtractor()
-                matcher = ResumeJobMatcher()
-                feedback_generator = LLMFeedbackGenerator(
-                    model_name=model_option)
-
-                # Extract text from PDF
-                resume_text = extract_text_from_pdf(uploaded_file)
-                cleaned_resume = clean_resume_text(resume_text)
-
-                # Extract skills
-                resume_skills = skill_extractor.extract_skills_from_text(
-                    cleaned_resume)
-                job_skills = skill_extractor.extract_skills_from_text(
-                    job_description)
-
-                # Store in session state
-                st.session_state.resume_skills = resume_skills
-                st.session_state.job_skills = job_skills
-
-                # Calculate match
-                results = matcher.calculate_comprehensive_match(
-                    resume_skills, job_skills)
-
-                # Generate feedback
-                improvement_suggestions = feedback_generator.generate_improvement_suggestions(
-                    resume_skills,
-                    job_skills,
-                    results['skill_gaps'],
-                    results['match_percentage']
-                )
-
-                # Store results and components in session state
-                st.session_state.results = {
-                    'match_results': results,
-                    'improvement_suggestions': improvement_suggestions,
-                    'resume_text': cleaned_resume,
-                    'job_description': job_description
-                }
-                st.session_state.feedback_generator = feedback_generator
-                st.session_state.analysis_complete = True
-
-                st.success("✅ Analysis complete!")
-
-            except Exception as e:
-                st.error(f"❌ Error during analysis: {str(e)}")
-
-    # Display results if analysis is complete
-    if st.session_state.analysis_complete and st.session_state.results:
-        display_results()
+    st.session_state.ranked_results = ranked_results
+    st.session_state.job_skills = job_skills
+    st.session_state.llm_feedback = llm_feedback
+    st.session_state.analysis_complete = True
 
 
 def display_results():
-    results = st.session_state.results
-    match_results = results['match_results']
+    ranked_results = st.session_state.ranked_results
 
-    st.markdown("---")
-    st.subheader("📊 Analysis Results")
+    st.subheader("📊 Ranked Resume Results")
+    if not ranked_results:
+        st.warning("No ranked results found.")
+        return
 
-    # Display match percentage in a metric card
-    col1, col2, col3, col4 = st.columns(4)
+    top_resume = ranked_results[0]
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("🏆 Top Resume", top_resume["file_name"])
+    metric_cols[1].metric("📈 Top Match", f"{top_resume['match_percentage']:.2f}%")
+    metric_cols[2].metric("🧠 Semantic", f"{top_resume['semantic_similarity']:.2f}")
+    metric_cols[3].metric("🎯 Skill Overlap", f"{top_resume['skill_overlap_score']:.2f}")
 
-    with col1:
-        st.metric(
-            label="🎯 Match Score",
-            value=f"{match_results['match_percentage']}%",
-            delta=f"{match_results['matched_skills_count']}/{match_results['total_job_skills']} skills matched"
+    ranking_rows = []
+    for idx, result in enumerate(ranked_results, start=1):
+        ranking_rows.append(
+            {
+                "Rank": idx,
+                "Resume": result["file_name"],
+                "Final Score (%)": round(result["match_percentage"], 2),
+                "Semantic": round(result["semantic_similarity"], 3),
+                "Skill Overlap": round(result["skill_overlap_score"], 3),
+                "Experience Match": round(result["experience_match_score"], 3),
+                "Matched Skills": result["matched_skills_count"],
+                "Missing Skills": result["missing_skills_count"],
+            }
         )
 
-    with col2:
-        st.metric(
-            label="✅ Matched Skills",
-            value=match_results['matched_skills_count']
-        )
+    st.dataframe(ranking_rows, use_container_width=True)
 
-    with col3:
-        st.metric(
-            label="❌ Missing Skills",
-            value=match_results['missing_skills_count']
-        )
+    st.markdown("### 🧩 Detailed Breakdown")
+    for idx, result in enumerate(ranked_results, start=1):
+        with st.expander(f"#{idx} - {result['file_name']} ({result['match_percentage']:.2f}%)"):
+            st.write("**Common Skills:**", ", ".join(result["common_skills"]) or "None")
+            st.write("**Missing Skills:**", ", ".join(result["skill_gaps"]) or "None")
+            st.write(
+                "**Experience:**",
+                f"Resume {result['resume_experience_years']} yrs vs Required {result['required_experience_years']} yrs",
+            )
 
-    with col4:
-        st.metric(
-            label="📝 Total Job Skills",
-            value=match_results['total_job_skills']
-        )
+    st.markdown("### 💡 RAG-based LLM Feedback (Top Resume)")
+    if st.session_state.llm_feedback:
+        st.info(st.session_state.llm_feedback)
 
-    # Create tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📋 Skills Overview",
-        "🔍 Detailed Match",
-        "💡 Improvement Suggestions",
-        "📈 Skill Gap Analysis"
-    ])
 
-    with tab1:
-        col1, col2 = st.columns(2)
+def main():
+    st.set_page_config(page_title="AI Resume Analyzer & Job Matcher", page_icon="📄", layout="wide")
+    st.title("🤖 AI Resume Analyzer & Job Matcher")
+    st.caption("Embedding + FAISS + Hybrid Scoring + RAG Feedback")
 
-        with col1:
-            st.markdown("### 📌 Your Skills")
-            if st.session_state.resume_skills:
-                resume_skills_str = ", ".join(st.session_state.resume_skills)
-                st.text_area("", value=resume_skills_str,
-                             height=200, disabled=True)
-            else:
-                st.warning("No skills detected in resume")
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        model_option = st.selectbox("Select LLM Model", ["phi3", "llama3"])
+        st.markdown("---")
+        st.markdown("**Pipeline:** Preprocess → Embedding → FAISS → Hybrid Score → RAG Feedback")
 
-        with col2:
-            st.markdown("### 🎯 Required Skills")
-            if st.session_state.job_skills:
-                job_skills_str = ", ".join(st.session_state.job_skills)
-                st.text_area("", value=job_skills_str,
-                             height=200, disabled=True)
-            else:
-                st.warning("No skills detected in job description")
+    uploaded_files = st.file_uploader(
+        "Upload one or more resumes (PDF)",
+        type=["pdf"],
+        accept_multiple_files=True,
+    )
+    job_description = st.text_area(
+        "Paste Job Description",
+        height=220,
+        placeholder="Paste the target job description here...",
+    )
 
-    with tab2:
-        st.markdown("### 📊 Match Details")
+    if st.button("🔍 Rank Resumes", type="primary", disabled=not (uploaded_files and job_description)):
+        with st.spinner("Analyzing and ranking resumes..."):
+            try:
+                run_analysis(uploaded_files, job_description, model_option)
+                st.success("Analysis complete.")
+            except Exception as exc:
+                st.error(f"Error during analysis: {exc}")
 
-        # Show common skills
-        st.markdown("#### ✅ Skills You Have That Match")
-        if match_results['common_skills']:
-            common_skills_str = ", ".join(match_results['common_skills'])
-            st.text_area("", value=common_skills_str,
-                         height=100, disabled=True)
-        else:
-            st.info("No matching skills found")
-
-        # Show match statistics
-        st.markdown("#### 📈 Matching Statistics")
-        stats_col1, stats_col2 = st.columns(2)
-
-        with stats_col1:
-            st.write("**Semantic Similarity:**",
-                     f"{match_results['semantic_similarity']:.2%}")
-            st.write("**Keyword Match:**",
-                     f"{match_results['keyword_match_percentage']:.1f}%")
-
-        with stats_col2:
-            st.write("**Weighted Score:**",
-                     f"{match_results['weighted_score']:.2%}")
-            st.write("**Match Quality:**",
-                     "Excellent" if match_results['match_percentage'] >= 80
-                     else "Good" if match_results['match_percentage'] >= 60
-                     else "Fair" if match_results['match_percentage'] >= 40
-                     else "Needs Improvement")
-
-    with tab3:
-        st.markdown("### 💡 Personalized Improvement Suggestions")
-
-        if results['improvement_suggestions']:
-            st.markdown(f"<div style='background-color: #262730; color: white; padding: 20px; border-radius: 10px; font-family: sans-serif;'>{results['improvement_suggestions']}</div>",
-                        unsafe_allow_html=True)
-        else:
-            st.warning(
-                "Could not generate improvement suggestions. Please ensure Ollama is running.")
-
-    with tab4:
-        st.markdown("### ❌ Missing Skills (Skill Gaps)")
-
-        if match_results['skill_gaps']:
-            # Create a dataframe-like display for missing skills
-            missing_skills_str = ", ".join(match_results['skill_gaps'])
-            st.text_area("", value=missing_skills_str,
-                         height=150, disabled=True)
-
-            st.markdown("#### 📚 Recommended Learning Path")
-            with st.spinner("Generating learning recommendations..."):
-                try:
-                    # Use the feedback generator from session state
-                    learning_path = st.session_state.feedback_generator.generate_skill_learning_path(
-                        match_results['skill_gaps'])
-
-                    if learning_path and "Error" not in learning_path:
-                        st.markdown(f"<div style='background-color: #1e3a5f; color: white; padding: 15px; border-radius: 8px; border-left: 4px solid #4da6ff; font-family: sans-serif;'>{learning_path}</div>",
-                                    unsafe_allow_html=True)
-                    else:
-                        st.warning(
-                            "Could not generate learning path. Please check Ollama connection.")
-                except Exception as e:
-                    st.error(f"Error generating learning path: {str(e)}")
-        else:
-            st.success(
-                "🎉 Congratulations! You have all the required skills for this position.")
+    if st.session_state.analysis_complete:
+        display_results()
 
 
 if __name__ == "__main__":

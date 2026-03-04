@@ -1,6 +1,6 @@
 import spacy
-import re
-from typing import List, Set
+from spacy.matcher import PhraseMatcher
+from typing import List, Dict
 
 
 class SkillExtractor:
@@ -15,22 +15,15 @@ class SkillExtractor:
             print("spaCy model 'en_core_web_sm' not found. Install it using: python -m spacy download en_core_web_sm")
             raise
 
-        # Define common skill patterns and keywords
         self.tech_skills = {
-            # Programming languages
-            'python', 'java', 'javascript', 'typescript', 'c++', 'c#', 'c', 'ruby', 'php', 'go', 'rust',
-            'swift', 'kotlin', 'scala', 'perl', 'r', 'matlab', 'sql', 'html', 'css', 'dart',
-
-            # Frameworks and Libraries
-            'react', 'angular', 'vue', 'django', 'flask', 'spring', 'node.js', 'express', 'laravel',
-            'tensorflow', 'pytorch', 'keras', 'pandas', 'numpy', 'scikit-learn', 'opencv', 'spark',
-            'hadoop', 'redux', 'graphql', 'rest', 'api', 'docker', 'kubernetes', 'aws', 'azure', 'gcp',
-
-            # Technologies and Tools
-            'git', 'github', 'gitlab', 'jenkins', 'ansible', 'terraform', 'linux', 'unix', 'windows',
-            'mysql', 'postgresql', 'mongodb', 'redis', 'elasticsearch', 'oracle', 'sqlite',
-            'machine learning', 'artificial intelligence', 'nlp', 'computer vision', 'data science',
-            'big data', 'cloud computing', 'devops', 'agile', 'scrum', 'ci/cd'
+            'python', 'java', 'javascript', 'typescript', 'c++', 'c#', 'go', 'rust',
+            'sql', 'html', 'css', 'react', 'angular', 'vue', 'django', 'flask',
+            'fastapi', 'spring', 'node.js', 'express', 'tensorflow', 'pytorch', 'keras',
+            'pandas', 'numpy', 'scikit-learn', 'opencv', 'spark', 'hadoop', 'graphql',
+            'rest', 'docker', 'kubernetes', 'aws', 'azure', 'gcp', 'git', 'github',
+            'jenkins', 'terraform', 'linux', 'mysql', 'postgresql', 'mongodb', 'redis',
+            'machine learning', 'artificial intelligence', 'nlp', 'data science',
+            'deep learning', 'llm', 'langchain', 'rag', 'faiss', 'streamlit', 'ci/cd'
         }
 
         # Soft skills
@@ -41,8 +34,25 @@ class SkillExtractor:
             'organizational', 'analytical', 'attention to detail', 'multitasking', 'stress management'
         }
 
-        # Combine all skills
         self.all_skills = self.tech_skills.union(self.soft_skills)
+
+        self.matcher = PhraseMatcher(self.nlp.vocab, attr="LOWER")
+        patterns = [self.nlp.make_doc(skill) for skill in sorted(self.all_skills)]
+        self.matcher.add("SKILLS", patterns)
+
+        self.skill_aliases = {
+            "nodejs": "node.js",
+            "node js": "node.js",
+            "js": "javascript",
+            "ml": "machine learning",
+            "ai": "artificial intelligence",
+            "nlp": "nlp",
+            "ci cd": "ci/cd",
+        }
+
+    def _normalize_skill(self, skill: str) -> str:
+        normalized = skill.lower().strip()
+        return self.skill_aliases.get(normalized, normalized)
 
     def extract_skills_from_text(self, text: str) -> List[str]:
         """
@@ -54,44 +64,21 @@ class SkillExtractor:
         Returns:
             List[str]: List of extracted skills
         """
-        # Process the text with spaCy
-        doc = self.nlp(text.lower())
+        if not text:
+            return []
 
+        doc = self.nlp(text.lower())
         found_skills = set()
 
-        # Method 1: Direct keyword matching
+        for match_id, start, end in self.matcher(doc):
+            found_skills.add(self._normalize_skill(doc[start:end].text))
+
+        lowered_text = text.lower()
         for skill in self.all_skills:
-            if skill in text.lower():
-                found_skills.add(skill)
+            if skill in lowered_text:
+                found_skills.add(self._normalize_skill(skill))
 
-        # Method 2: Entity recognition for relevant skills
-        for ent in doc.ents:
-            if ent.label_ in ['ORG', 'PRODUCT', 'WORK_OF_ART', 'EVENT', 'LAW']:
-                # Check if entity matches any known skills
-                entity_text = ent.text.lower().strip()
-                for skill in self.all_skills:
-                    if skill in entity_text or entity_text in skill:
-                        found_skills.add(skill)
-
-        # Method 3: Pattern-based extraction
-        # Look for phrases that might indicate skills (e.g., "experienced in X", "proficient with Y")
-        patterns = [
-            r'experienced in ([a-zA-Z\s]+)',
-            r'proficient in ([a-zA-Z\s]+)',
-            r'knowledge of ([a-zA-Z\s]+)',
-            r'familiar with ([a-zA-Z\s]+)',
-            r'skilled in ([a-zA-Z\s]+)'
-        ]
-
-        for pattern in patterns:
-            matches = re.findall(pattern, text.lower())
-            for match in matches:
-                skill_candidate = match.strip()
-                for skill in self.all_skills:
-                    if skill in skill_candidate or skill_candidate in skill:
-                        found_skills.add(skill)
-
-        return sorted(list(found_skills))
+        return sorted([skill for skill in found_skills if skill in self.all_skills])
 
     def extract_technical_skills(self, text: str) -> List[str]:
         """
@@ -153,6 +140,31 @@ class SkillExtractor:
         return {
             'technical': technical,
             'soft': soft
+        }
+
+    def compute_skill_overlap(self, resume_skills: List[str], job_skills: List[str]) -> Dict[str, object]:
+        resume_set = {self._normalize_skill(skill) for skill in resume_skills}
+        job_set = {self._normalize_skill(skill) for skill in job_skills}
+
+        if not job_set:
+            return {
+                "overlap_score": 0.0,
+                "common_skills": [],
+                "missing_skills": [],
+                "matched_count": 0,
+                "required_count": 0,
+            }
+
+        common = sorted(resume_set.intersection(job_set))
+        missing = sorted(job_set - resume_set)
+        overlap_score = len(common) / len(job_set)
+
+        return {
+            "overlap_score": overlap_score,
+            "common_skills": common,
+            "missing_skills": missing,
+            "matched_count": len(common),
+            "required_count": len(job_set),
         }
 
 
